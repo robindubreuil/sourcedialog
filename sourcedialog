@@ -824,7 +824,8 @@ _sd_listbox_draw() {
     [[ $mark == no ]] || (( x += _SD_MARK_WIDTH ))
     (( ilight - ifirst < height )) && _sd_pos "$(( y + ilight - ifirst ))" "$x"
 
-    local scroll_color="$sgr0$(_sd_fg "$_SD_LIST_FG")$(_sd_bg "$_SD_LIST_BG")"
+    local scroll_color
+    scroll_color="$sgr0$(_sd_fg "$_SD_LIST_FG")$(_sd_bg "$_SD_LIST_BG")"
     if (( ifirst > 0 )); then
         _sd_pos "$y" "$(( x + width - 1 ))"
         printf '%s' "${scroll_color}$_SD_SCROLL_UP"
