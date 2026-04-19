@@ -276,6 +276,7 @@ sd_clear() {
         unset "_SD_TYPES[$name]" "_SD_PROP_LIST[$name]"
     done
     _SD_ORDER=()
+    # shellcheck disable=SC2034
     sd_names=()
 }
 
@@ -471,10 +472,10 @@ _sd_textbox_draw() {
     local -a words=()
     if [[ -n ${text// } ]]; then
         text="${text//\\n/ $'\x01' }"
-        # shellcheck disable=SC2206
         local _old_noglob
         [[ -o noglob ]] && _old_noglob=1 || _old_noglob=0
         set -f
+        # shellcheck disable=SC2206
         words=(${text// /$'\n'})
         (( _old_noglob )) || set +f
     fi
@@ -784,13 +785,11 @@ _sd_listbox_draw() {
     local maxindex=${#_sd_la2[@]}
 
     local sgr0=${_SD_CAPS[sgr0]} bold=${_SD_CAPS[bold]}
-    local cn cf ck scn sck scb
+    local cn cf scn sck
     cn="$sgr0$(_sd_fg "$_SD_LIST_FG")$bold$(_sd_bg "$_SD_LIST_BG")"
     cf="$sgr0$(_sd_fg "$_SD_LIST_KEY")$(_sd_bg "$_SD_LIST_BG")"
-    ck="$sgr0$(_sd_fg "$_SD_LIST_BG")$(_sd_bg "$_SD_LIST_BG")"
     scn="$sgr0$(_sd_fg "$_SD_LIST_SEL_FG")$bold$(_sd_bg "$_SD_LIST_SEL_BG")"
     sck="$sgr0$(_sd_fg "$_SD_LIST_KEY")$bold$(_sd_bg "$_SD_LIST_SEL_BG")"
-    scb="$sgr0$(_sd_fg 7)$bold$(_sd_bg "$_SD_LIST_SEL_BG")"
 
     if [[ $mark != no ]]; then
         if (( width < _SD_MARK_WIDTH )); then width=0; else (( width -= _SD_MARK_WIDTH )); fi
