@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# demo — Showcases every sourcedialog widget and new features
+#
+# Demonstrates:
+#   - All widget types: canvas, frame, textbox, pushbutton, inputbox,
+#     passwordbox, menubox, checklist, radiolist
+#   - Color theme customization via _SD_* variables
+#   - sd_clear() for reusable dialogs
+#   - Multi-page dialog flow
+
+source "$(dirname "$0")/../sourcedialog"
+
+# ---------------------------------------------------------------------------
+# Page 1: Login
+# ---------------------------------------------------------------------------
+
+page_login() {
+    user=''
+    pass=''
+
+    sd_clear
+
+    sd_load_canvas     name=cv1  x=17 y=3  width=45 height=14 caption=" LOGIN "
+    sd_load_textbox    name=tb1  x=20 y=5  width=39 text="Enter your credentials"
+    sd_load_textbox    name=tb2  x=20 y=7  width=8  text="User:"
+    sd_load_inputbox   name=ib1  x=29 y=7  width=30 varname=user
+    sd_load_textbox    name=tb3  x=20 y=9  width=8  text="Pass:"
+    sd_load_passwordbox name=ib2 x=29 y=9  width=30 varname=pass
+    sd_load_pushbutton name=ok1  x=30 y=12 caption="  Next  "
+    sd_load_pushbutton name=cc1  x=42 y=12 caption=" Cancel "
+
+    sd_ok1_push() { return 0; }
+    sd_cc1_push() { return 1; }
+
+    sd_start
+}
+
+# ---------------------------------------------------------------------------
+# Page 2: Preferences  (custom green theme)
+# ---------------------------------------------------------------------------
+
+page_prefs() {
+    _SD_BG=2
+    _SD_FRAME_BG=7
+    _SD_BTN_SEL_FG=0
+    _SD_BTN_SEL_BG=2
+
+    langs=( "Bash" "Python" "Rust" "Go" "TypeScript" "C" "Zig" "Nim" )
+    index_langs[0]=${langs[0]}
+    index_langs[2]=${langs[2]}
+
+    ed='vim'
+    theme_option='dark'
+
+    sd_clear
+
+    sd_load_canvas     name=cv2  x=8 y=1  width=62 height=21 caption=" PREFERENCES "
+    sd_load_textbox    name=tb4  x=10 y=3  width=58 text="Configure your development environment"
+    sd_load_textbox    name=tb5  x=10 y=5  width=12 text="Editor:"
+    sd_load_inputbox   name=ib3  x=23 y=5  width=20 varname=ed
+    sd_load_textbox    name=tb6  x=10 y=7  width=12 text="Languages:"
+    sd_load_frame      name=fr1  x=23 y=6  width=30 height=7
+    sd_load_checklist  name=cl1  x=24 y=7  width=28 height=5 \
+                       arrayname=langs indexname=index_langs
+    sd_load_textbox    name=tb7  x=10 y=14 width=8  text="Theme:"
+    sd_load_radiolist  name=rl1  x=23 y=14 width=18 height=3 \
+                       arrayname=themes indexname=index_themes
+    sd_load_textbox    name=tb8  x=10 y=18 width=58 \
+                        text="Arrows navigate, Space toggles, Tab/Enter confirm"
+    sd_load_pushbutton name=ok2  x=32 y=20 caption="  Done  "
+    sd_load_pushbutton name=bk1  x=45 y=20 caption=" Back "
+
+    sd_ok2_push() { return 0; }
+    sd_bk1_push() { return 2; }
+
+    sd_start
+}
+
+# ---------------------------------------------------------------------------
+# Main Loop
+# ---------------------------------------------------------------------------
+
+themes=( dark light solarized )
+
+page=login
+while true; do
+    case $page in
+        login)
+            page_login; rc=$?
+            clear
+            case $rc in
+                0)
+                    if [[ -z $user ]]; then
+                        echo "Username cannot be empty."
+                        read -r -p "Press Enter to retry..."
+                        page=login
+                        continue
+                    fi
+                    page=prefs
+                    ;;
+                1)  echo "Cancelled." ; exit 1 ;;
+        esac
+        ;;
+        prefs)
+            page_prefs; rc=$?
+            clear
+            case $rc in
+                0)  break ;;
+                2)  page=login ;;
+                *)  exit "$rc" ;;
+            esac
+            ;;
+    esac
+done
+
+# Reset colors to default for summary
+_SD_BG=4
+_SD_BTN_SEL_FG=3
+_SD_BTN_SEL_BG=4
+
+echo "=== Summary ==="
+echo "User:      $user"
+echo "Editor:    $ed"
+echo "Languages: ${index_langs[*]}"
+echo "Theme:     ${themes[$sd_rl1_ilight]}"

@@ -1,0 +1,836 @@
+#!/usr/bin/env bash
+# sourcedialog — Pure Bash TUI dialog library
+#
+# Create interactive terminal dialogs using only Bash builtins.
+# No external dependencies (dialog, whiptail, ncurses, etc.).
+#
+#   source /path/to/sourcedialog
+#
+# Copyright (c) 2025 Robin Dubreuil <63008968+robindubreuil@users.noreply.github.com>
+# Licensed under GPLv3. See LICENSE file.
+#
+# Inspired by SourceDialog by Antonio Macchi (2008).
+# Drop-in upgrade with full API compatibility.
+#
+# Requires: Bash 4.3+
+#
+
+# ---------------------------------------------------------------------------
+# Guards
+# ---------------------------------------------------------------------------
+
+# shellcheck disable=SC2317
+(( BASH_VERSINFO[0] < 4 || ( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3 ) )) && {
+    printf 'sourcedialog requires Bash 4.3+. Current: %s\n' "$BASH_VERSION" >&2
+    return 1 2>/dev/null || exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Internal State
+# ---------------------------------------------------------------------------
+
+declare -ga  _SD_ORDER=()
+declare -gA  _SD_TYPES=()
+declare -gA  _SD_CAPS=()
+declare -gA  _SD_ACSC_MAP=()
+declare -ga  _SD_BOX=()
+declare -g   _SD_ACTIVE=0
+declare -gA  _SD_PROP_LIST=()
+
+sd_names=()
+
+# ---------------------------------------------------------------------------
+# Customizable Colors  (override before calling sd_start)
+#
+#   _SD_BG=2  source ./sourcedialog   # green background
+# ---------------------------------------------------------------------------
+
+: "${_SD_BG:=4}"
+: "${_SD_FG:=7}"
+: "${_SD_FRAME_BG:=7}"
+: "${_SD_FRAME_HI:=0}"
+: "${_SD_FRAME_LO:=0}"
+: "${_SD_TEXT_FG:=0}"
+: "${_SD_TEXT_BG:=7}"
+: "${_SD_BTN_FG:=0}"
+: "${_SD_BTN_BG:=7}"
+: "${_SD_BTN_KEY:=1}"
+: "${_SD_BTN_SEL_FG:=3}"
+: "${_SD_BTN_SEL_BG:=4}"
+: "${_SD_INPUT_FG:=0}"
+: "${_SD_INPUT_BG:=7}"
+: "${_SD_INPUT_SEL_FG:=7}"
+: "${_SD_INPUT_SEL_BG:=4}"
+: "${_SD_LIST_FG:=4}"
+: "${_SD_LIST_BG:=7}"
+: "${_SD_LIST_KEY:=1}"
+: "${_SD_LIST_SEL_FG:=3}"
+: "${_SD_LIST_SEL_BG:=4}"
+
+# ---------------------------------------------------------------------------
+# Customizable Style  (override before calling sd_start)
+#
+#   _SD_STYLE=unicode  source ./sourcedialog
+#   _SD_CORNER=square  source ./sourcedialog
+# ---------------------------------------------------------------------------
+
+: "${_SD_STYLE:=auto}"
+: "${_SD_CORNER:=rounded}"
+: "${_SD_256COLOR:=auto}"
+: "${_SD_SHADOW_BG:=}"
+
+# ---------------------------------------------------------------------------
+# Terminal Capabilities
+# ---------------------------------------------------------------------------
+
+_sd_init_caps() {
+    _SD_CAPS[bold]=$'\e[1m'
+    _SD_CAPS[ht]=$'\t'
+    _SD_CAPS[kbs]=$'\x7f'
+    _SD_CAPS[kcbt]=$'\e[Z'
+    _SD_CAPS[knp]=$'\e[6~'
+    _SD_CAPS[kpp]=$'\e[5~'
+
+    if [[ $TERM == linux ]]; then
+        _SD_CAPS[sgr0]=$'\e[0;10m'
+        _SD_CAPS[civis]=$'\e[?25l\e[?1c'
+        _SD_CAPS[cnorm]=$'\e[?25h\e[?0c'
+        _SD_CAPS[smkx]=$''
+        _SD_CAPS[rmkx]=$''
+        _SD_CAPS[smacs]=$'\e[11m'
+        _SD_CAPS[rmacs]=$'\e[10m'
+        _SD_CAPS[kcuu1]=$'\e[A'
+        _SD_CAPS[kcud1]=$'\e[B'
+        _SD_CAPS[kcuf1]=$'\e[C'
+        _SD_CAPS[kcub1]=$'\e[D'
+        _SD_CAPS[kend]=$'\e[4~'
+        _SD_CAPS[khome]=$'\e[1~'
+        _SD_CAPS[acsc]=$'+\020,\021-\030.\0310\333\x60\004a\261f\370g\361h\260i\316j\331k\277l\332m\300n\305o~p\304q\304r\304s_t\303u\264v\301w\302x\263y\363z\362{\343|\330}\234~\376'
+    else
+        _SD_CAPS[sgr0]=$'\e[m\e(B'
+        _SD_CAPS[civis]=$'\e[?25l'
+        _SD_CAPS[cnorm]=$'\e[?12l\e[?25h'
+        _SD_CAPS[smkx]=$'\e[?1h\e='
+        _SD_CAPS[rmkx]=$'\e[?1l\e>'
+        _SD_CAPS[smacs]=$'\e(0'
+        _SD_CAPS[rmacs]=$'\e(B'
+        _SD_CAPS[kcuu1]=$'\eOA'
+        _SD_CAPS[kcud1]=$'\eOB'
+        _SD_CAPS[kcuf1]=$'\eOC'
+        _SD_CAPS[kcub1]=$'\eOD'
+        _SD_CAPS[kend]=$'\eOF'
+        _SD_CAPS[khome]=$'\eOH'
+        _SD_CAPS[acsc]=$'\x60\x60aaffggiijjkkllmmnnooppqqrrssttuuvvwwxxyyzz{{||}}~~'
+    fi
+
+    local i acsc=${_SD_CAPS[acsc]}
+    for (( i = 0; i < ${#acsc}; i += 2 )); do
+        _SD_ACSC_MAP[${acsc:i:1}]=${acsc:i+1:1}
+    done
+
+    if [[ ${_SD_STYLE:-auto} == auto ]]; then
+        case "${LANG:-}${LC_CTYPE:-}" in
+            *UTF-8*|*utf8*|*utf-8*) _SD_UNICODE=1 ;;
+            *) _SD_UNICODE=0 ;;
+        esac
+    elif [[ ${_SD_STYLE:-} == unicode ]]; then
+        _SD_UNICODE=1
+    else
+        _SD_UNICODE=0
+    fi
+
+    if [[ ${_SD_256COLOR:-auto} == auto ]]; then
+        [[ ${TERM:-} == *256color* || ${COLORTERM:-} == *256* ]] && _SD_HAS_256=1 || _SD_HAS_256=0
+    elif [[ ${_SD_256COLOR:-} == yes ]]; then
+        _SD_HAS_256=1
+    else
+        _SD_HAS_256=0
+    fi
+
+    if [[ -z ${_SD_SHADOW_BG:-} ]]; then
+        (( _SD_HAS_256 )) && _SD_SHADOW_BG=236 || _SD_SHADOW_BG=0
+    fi
+
+    if (( _SD_UNICODE )); then
+        if [[ ${_SD_CORNER:-rounded} == rounded ]]; then
+            _SD_BOX=(╯ ╮ ╭ ╰ ─ │)
+        else
+            _SD_BOX=(┘ ┐ ┌ └ ─ │)
+        fi
+        _SD_CAPS[smacs]=$''
+        _SD_CAPS[rmacs]=$''
+        _SD_MARK_WIDTH=2
+        _SD_CHECK_ON='■'
+        _SD_CHECK_OFF='□'
+        _SD_RADIO_ON='◉'
+        _SD_RADIO_OFF='○'
+        _SD_BTN_OPEN='['
+        _SD_BTN_CLOSE=']'
+        _SD_SCROLL_UP='▲'
+        _SD_SCROLL_DOWN='▼'
+    else
+        _SD_BOX=(
+            "${_SD_ACSC_MAP[j]:-+}"
+            "${_SD_ACSC_MAP[k]:-+}"
+            "${_SD_ACSC_MAP[l]:-+}"
+            "${_SD_ACSC_MAP[m]:-+}"
+            "${_SD_ACSC_MAP[q]:--}"
+            "${_SD_ACSC_MAP[x]:-|}"
+        )
+        _SD_MARK_WIDTH=4
+        _SD_CHECK_ON='[*]'
+        _SD_CHECK_OFF='[ ]'
+        _SD_RADIO_ON='(*)'
+        _SD_RADIO_OFF='( )'
+        _SD_BTN_OPEN='<'
+        _SD_BTN_CLOSE='>'
+        _SD_SCROLL_UP='^'
+        _SD_SCROLL_DOWN='v'
+    fi
+}
+
+_sd_fg() { if (( ${_SD_HAS_256:-0} )); then printf '\e[38;5;%dm' "$1"; else printf '\e[3%dm' "$1"; fi; }
+_sd_bg() { if (( ${_SD_HAS_256:-0} )); then printf '\e[48;5;%dm' "$1"; else printf '\e[4%dm' "$1"; fi; }
+_sd_pos() { printf '\e[%d;%dH' "$(( $1 + 1 ))" "$(( $2 + 1 ))"; }
+
+# ---------------------------------------------------------------------------
+# Widget Registration
+# ---------------------------------------------------------------------------
+
+sd_load() {
+    local name='' type='' prop='' propname='' propvalue=''
+    local -a props=("$@")
+
+    for prop in "$@"; do
+        case "${prop%%=*}" in
+            name) name="${prop#*=}" ;;
+            type) type="${prop#*=}" ;;
+        esac
+    done
+
+    _SD_ORDER+=("$name")
+    _SD_TYPES[$name]=$type
+    _SD_PROP_LIST[$name]=
+
+    for prop in "${props[@]}"; do
+        propname=${prop%%=*}
+        propvalue="${prop#*=}"
+        [[ $propname == name || $propname == type ]] && continue
+        printf -v "sd_${name}_${propname}" '%s' "$propvalue"
+        _SD_PROP_LIST[$name]+="${propname} "
+    done
+
+    sd_names=("${_SD_ORDER[@]}")
+}
+
+sd_load_canvas()      { sd_load "$@" type=canvas; }
+sd_load_frame()       { sd_load "$@" type=canvas shadow=no frame=concave; }
+sd_load_textbox()     { sd_load "$@" type=textbox; }
+sd_load_pushbutton()  { sd_load "$@" type=pushbutton; }
+sd_load_inputbox()    { sd_load "$@" type=inputbox; }
+sd_load_passwordbox() { sd_load "$@" type=inputbox password=yes; }
+sd_load_menubox()     { sd_load "$@" type=listbox; }
+sd_load_checklist()   { sd_load "$@" type=listbox mark=check multi=yes; }
+sd_load_radiolist()   { sd_load "$@" type=listbox mark=radio multi=no; }
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+sd_start() {
+    local _retval=
+    trap '_sd_abort' INT TERM
+    sd_init
+    sd_draw
+    sd_read; _retval=$?
+    sd_reset
+    trap - INT TERM
+    return "$_retval"
+}
+
+sd_init() {
+    _SD_ACTIVE=1
+    _sd_init_caps
+    stty -echo
+    printf '%s' "${_SD_CAPS[civis]}"
+    printf '%s' "${_SD_CAPS[smkx]}"
+    IFS=$'\n'
+}
+
+sd_reset() {
+    IFS=$' \t\n'
+    printf '%s' "${_SD_CAPS[rmkx]}"
+    printf '%s' "${_SD_CAPS[cnorm]}"
+    printf '%s' "${_SD_CAPS[sgr0]}"
+    stty echo
+    _SD_ACTIVE=0
+}
+
+sd_clear() {
+    local name prop
+    for name in "${_SD_ORDER[@]}"; do
+        for prop in ${_SD_PROP_LIST[$name]}; do
+            unset "sd_${name}_${prop}"
+        done
+        unset "sd_${name}_ilight" "sd_${name}_ifirst"
+        unset "_SD_TYPES[$name]" "_SD_PROP_LIST[$name]"
+    done
+    _SD_ORDER=()
+    sd_names=()
+}
+
+sd_draw() {
+    local name type
+    printf '%s' "$(_sd_bg "$_SD_BG")"
+    clear
+    for name in "${_SD_ORDER[@]}"; do
+        type=${_SD_TYPES[$name]}
+        "_sd_${type}_draw" "$name"
+    done
+}
+
+sd_read() {
+    local i=0 max=${#_SD_ORDER[@]}
+    local direction=1
+    local name type retval
+
+    (( max == 0 )) && return 127
+
+    while true; do
+        name=${_SD_ORDER[$i]}
+        type=${_SD_TYPES[$name]}
+        "_sd_${type}_read" "$name" 2>/dev/null
+        retval=$?
+        case $retval in
+            127) : ;;
+            254) direction=-1 ;;
+            255) direction=1 ;;
+            *) break ;;
+        esac
+        (( i += direction ))
+        (( i < 0 )) && i=$(( max - 1 ))
+        (( i >= max )) && i=0
+    done
+    return "$retval"
+}
+
+_sd_abort() {
+    sd_reset
+    printf '\n'
+    exit 130
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_sd_repeat() {
+    local _s
+    printf -v _s '%*s' "$1" ''
+    printf '%s' "${_s// /$2}"
+}
+
+_sd_swap() {
+    local -n _sa=$1 _sb=$2
+    local _st=$_sa
+    _sa=$_sb
+    _sb=$_st
+}
+
+_sd_escape_parse() {
+    local -a esc=(
+        "${_SD_CAPS[kcuu1]}"
+        "${_SD_CAPS[kcud1]}"
+        "${_SD_CAPS[kcuf1]}"
+        "${_SD_CAPS[kcub1]}"
+        "${_SD_CAPS[ht]}"
+        "${_SD_CAPS[kcbt]}"
+        "${_SD_CAPS[kbs]}"
+        "${_SD_CAPS[kpp]}"
+        "${_SD_CAPS[knp]}"
+        "${_SD_CAPS[khome]}"
+        "${_SD_CAPS[kend]}"
+    )
+    local -a out=(
+        $'\ekcuu1'  $'\ekcud1'  $'\ekcuf1'  $'\ekcub1'
+        $'\eht'     $'\ekcbt'   $'\ekbs'
+        $'\ekpp'    $'\eknp'    $'\ekhome'  $'\ekend'
+    )
+
+    local i=0 len=1 seq="$1" c2
+    while (( i < ${#esc[@]} )); do
+        if [[ $seq == "${esc[i]::$len}" ]]; then
+            if (( ${#esc[i]} == len )); then
+                printf '%s' "${out[i]}"
+                return 0
+            fi
+            read -r -s -n1 -t0.1 c2 || break
+            seq+="$c2"
+            (( i = 0, len++ ))
+        else
+            (( i++ ))
+        fi
+    done
+    printf '%s' "${seq: -1}"
+}
+
+# ---------------------------------------------------------------------------
+# Canvas Widget
+# ---------------------------------------------------------------------------
+
+_sd_canvas_read() { return 127; }
+
+_sd_canvas_draw() {
+    local name=$1
+    local -n _cx="sd_${name}_x" _cy="sd_${name}_y"
+    local -n _cw="sd_${name}_width" _ch="sd_${name}_height"
+    local -n _cc="sd_${name}_caption"
+    local -n _cs="sd_${name}_shadow" _cf="sd_${name}_frame"
+
+    local x=${_cx:-0} y=${_cy:-0}
+    local w=${_cw:-2}; (( w < 2 )) && w=2
+    local h=${_ch:-0}
+    local caption=${_cc:-}
+    local shadow=${_cs:-yes}
+    local frame=${_cf:-convex}
+
+    local x2=$(( w - 2 ))
+    caption="${caption:0:x2}"
+    local xb=$(( (x2 - ${#caption}) / 2 ))
+    local xa=$(( x2 - (xb + ${#caption}) ))
+
+    local sgr0=${_SD_CAPS[sgr0]} bold=${_SD_CAPS[bold]}
+    local smacs=${_SD_CAPS[smacs]}
+
+    local cfill cfl cfh cblk
+    cfill="$sgr0$(_sd_fg "$_SD_TEXT_FG")$bold$(_sd_bg "$_SD_FRAME_BG")"
+    cfl="$sgr0$(_sd_fg "$_SD_FRAME_HI")$bold$(_sd_bg "$_SD_FRAME_BG")$smacs"
+    cfh="$sgr0$(_sd_fg "$_SD_FRAME_LO")$(_sd_bg "$_SD_FRAME_BG")$smacs"
+    cblk="$sgr0$(_sd_bg "$_SD_SHADOW_BG")"
+
+    [[ $frame == concave ]] && _sd_swap cfl cfh
+
+    local y2
+    for (( y2 = 0; y2 < h; y2++ )); do
+        _sd_pos "$(( y + y2 ))" "$x"
+        case $y2 in
+            0)
+                printf '%s' "$cfl${_SD_BOX[2]}"
+                _sd_repeat "$xb" "${_SD_BOX[4]}"
+                printf '%s%s' "$cfill" "$caption"
+                printf '%s' "$cfl"
+                _sd_repeat "$xa" "${_SD_BOX[4]}"
+                printf '%s' "$cfh${_SD_BOX[1]}"
+                ;;
+            $(( h - 1 )))
+                printf '%s' "$cfl${_SD_BOX[3]}"
+                printf '%s' "$cfh"
+                _sd_repeat "$x2" "${_SD_BOX[4]}"
+                printf '%s' "${_SD_BOX[0]}"
+                ;;
+            *)
+                printf '%s' "$cfl${_SD_BOX[5]}"
+                printf '%s' "$cfill"
+                printf '%*s' "$x2" ''
+                printf '%s' "$cfh${_SD_BOX[5]}"
+                ;;
+        esac
+
+        if [[ $shadow == yes && $y2 -gt 0 ]]; then
+            printf '%s' "$cblk"
+            printf '  '
+        fi
+    done
+
+    if [[ $shadow == yes ]]; then
+        printf '%s' "$cblk"
+        _sd_pos "$(( y + h ))" "$(( x + 2 ))"
+        printf '%*s' "$w" ''
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Textbox Widget
+# ---------------------------------------------------------------------------
+
+_sd_textbox_read() { return 127; }
+
+_sd_textbox_draw() {
+    local name=$1
+    local -n _tx="sd_${name}_x" _ty="sd_${name}_y"
+    local -n _tt="sd_${name}_text"
+    local -n _tw="sd_${name}_width" _th="sd_${name}_height"
+
+    local x=${_tx:-0} y=${_ty:-0}
+    local text=${_tt:-}
+    local width=${_tw:-${#text}}
+    local height=${_th:-1}
+
+    printf '%s' "${_SD_CAPS[sgr0]}$(_sd_fg "$_SD_TEXT_FG")$(_sd_bg "$_SD_TEXT_BG")"
+
+    local -a words=()
+    if [[ -n ${text// } ]]; then
+        text="${text//\\n/ $'\x01' }"
+        # shellcheck disable=SC2206
+        local _old_noglob
+        [[ -o noglob ]] && _old_noglob=1 || _old_noglob=0
+        set -f
+        words=(${text// /$'\n'})
+        (( _old_noglob )) || set +f
+    fi
+
+    _sd_pos "$y" "$x"
+    local y2=0 x2=0 word
+
+    for word in "${words[@]}"; do
+        word="${word:0:width}"
+        if [[ $word == $'\x01' ]]; then
+            printf '%*s' "$(( width - x2 ))" ''
+            (( x2 = 0, y2++ ))
+            (( y2 >= height )) && break
+            _sd_pos "$(( y + y2 ))" "$(( x + x2 ))"
+            continue
+        fi
+        if (( ${#word} + x2 > width )); then
+            printf '%*s' "$(( width - x2 ))" ''
+            (( x2 = 0, y2++ ))
+            (( y2 >= height )) && break
+            _sd_pos "$(( y + y2 ))" "$(( x + x2 ))"
+        fi
+        printf '%s' "$word"
+        (( x2 += ${#word} ))
+        if (( x2 < width )); then
+            printf ' '
+            (( x2++ ))
+        fi
+    done
+
+    while (( y2 < height )); do
+        printf '%*s' "$(( width - x2 ))" ''
+        (( x2 = 0, y2++ ))
+        (( y2 < height )) && _sd_pos "$(( y + y2 ))" "$x"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Pushbutton Widget
+# ---------------------------------------------------------------------------
+
+_sd_pushbutton_read() {
+    local name=$1 c='' retval=''
+
+    _sd_pushbutton_draw "$name" selection
+    while true; do
+        printf '%s' "${_SD_CAPS[cnorm]}"
+        read -r -s -n1 c
+        printf '%s' "${_SD_CAPS[civis]}"
+        c="$(_sd_escape_parse "$c")"
+
+        if [[ -z $c ]]; then
+            "sd_${name}_push" 2>/dev/null
+            retval=$?
+            case $retval in
+                127 | 254 | 255) : ;;
+                *) break ;;
+            esac
+        fi
+
+        case "$c" in
+            $'\e')      retval=27;  break ;;
+            $'\ekcuf1') retval=255; break ;;
+            $'\ekcub1') retval=254; break ;;
+            $'\eht')    retval=255; break ;;
+            $'\ekcbt')  retval=254; break ;;
+        esac
+    done
+    _sd_pushbutton_draw "$name"
+    return "$retval"
+}
+
+_sd_pushbutton_draw() {
+    local name=$1
+    local -n _bx="sd_${name}_x" _by="sd_${name}_y"
+    local -n _bc="sd_${name}_caption"
+    local x=${_bx:-0} y=${_by:-0}
+    local caption=${_bc:-}
+    local capt2="${caption//[^[:alnum:]]/}"
+
+    local sgr0=${_SD_CAPS[sgr0]} bold=${_SD_CAPS[bold]}
+    local color color_key color_brk
+
+    if [[ ${2:-} == selection ]]; then
+        color="$sgr0$(_sd_fg "$_SD_BTN_SEL_FG")$bold$(_sd_bg "$_SD_BTN_SEL_BG")"
+        color_key="$sgr0$(_sd_fg 7)$bold$(_sd_bg "$_SD_BTN_SEL_BG")"
+        color_brk="$sgr0$(_sd_fg 7)$bold$(_sd_bg "$_SD_BTN_SEL_BG")"
+    else
+        color="$sgr0$(_sd_fg "$_SD_BTN_FG")$bold$(_sd_bg "$_SD_BTN_BG")"
+        color_key="$sgr0$(_sd_fg "$_SD_BTN_KEY")$(_sd_bg "$_SD_BTN_BG")"
+        color_brk="$sgr0$(_sd_fg "$_SD_BTN_FG")$(_sd_bg "$_SD_BTN_BG")"
+    fi
+
+    _sd_pos "$y" "$x"
+    printf '%s' "$color_brk$_SD_BTN_OPEN"
+    printf '%s' "$color"
+    if [[ -n $capt2 ]]; then
+        printf '%s' "${caption%%[[:alnum:]]*}"
+        printf '%s' "$color_key"
+        printf '%s' "${capt2:0:1}"
+        printf '%s' "$color"
+        printf '%s' "${caption#*[[:alnum:]]}"
+    else
+        printf '%s' "$caption"
+    fi
+    printf '%s' "${color_brk}$_SD_BTN_CLOSE"
+    _sd_pos "$y" "$(( x + 1 ))"
+    printf '%s' "$color"
+    if [[ -n $capt2 ]]; then
+        printf '%s' "${caption%%[[:alnum:]]*}"
+    else
+        printf '%s' "$caption"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Inputbox Widget
+# ---------------------------------------------------------------------------
+
+_sd_inputbox_read() {
+    local name=$1
+    local -n _ivn="sd_${name}_varname"
+    local -n _iw="sd_${name}_width"
+    local varname=${_ivn:-}
+    local maxwidth=$(( ${_iw:-0} - 1 ))
+    (( maxwidth < 0 )) && maxwidth=0
+    local c='' retval='' val=''
+
+    while true; do
+        _sd_inputbox_draw "$name" selection
+        printf '%s' "${_SD_CAPS[cnorm]}"
+        read -r -s -n1 c
+        printf '%s' "${_SD_CAPS[civis]}"
+        c="$(_sd_escape_parse "$c")"
+
+        val="${!varname}"
+        case "$c" in
+            $'\e')      retval=27;  break ;;
+            $'\ekcuf1') retval=255; break ;;
+            $'\ekcub1') retval=254; break ;;
+            $'\eht')    retval=255; break ;;
+            $'\ekcbt')  retval=254; break ;;
+            $'\ekbs')
+                printf -v "$varname" '%s' "${val%?}"
+                ;;
+            '')
+                retval=255; break ;;
+            $'\e'*)
+                : ;;
+            *)
+                (( ${#val} < maxwidth )) && printf -v "$varname" '%s%s' "$val" "$c"
+                ;;
+        esac
+    done
+    _sd_inputbox_draw "$name"
+    return "$retval"
+}
+
+_sd_inputbox_draw() {
+    local name=$1
+    local -n _ix="sd_${name}_x" _iy="sd_${name}_y"
+    local -n _iw2="sd_${name}_width" _ivn2="sd_${name}_varname"
+    local -n _ipw="sd_${name}_password"
+    local x=${_ix:-0} y=${_iy:-0}
+    local width=${_iw2:-0}
+    local varname=${_ivn2:-sd_novarname}
+    local password=${_ipw:-no}
+    local val="${!varname}"
+    local varin=${#val}
+    local varout=$(( width - varin ))
+    (( varout < 0 )) && varout=0
+
+    if [[ ${2:-} == selection ]]; then
+        printf '%s' "${_SD_CAPS[sgr0]}$(_sd_fg "$_SD_INPUT_SEL_FG")$(_sd_bg "$_SD_INPUT_SEL_BG")"
+    else
+        printf '%s' "${_SD_CAPS[sgr0]}$(_sd_fg "$_SD_INPUT_FG")$(_sd_bg "$_SD_INPUT_BG")"
+    fi
+
+    _sd_pos "$y" "$x"
+    if [[ $password == yes ]]; then
+        _sd_repeat "$varin" "*"
+    else
+        printf '%s' "$val"
+    fi
+    printf '%*s' "$varout" ''
+    _sd_pos "$y" "$(( x + varin ))"
+}
+
+# ---------------------------------------------------------------------------
+# Listbox Widget  (menubox / checklist / radiolist)
+# ---------------------------------------------------------------------------
+
+_sd_listbox_read() {
+    local name=$1
+    local -n _la="sd_${name}_arrayname"
+    local -n _li="sd_${name}_indexname"
+    local -n _lh="sd_${name}_height"
+    local -n _lm="sd_${name}_multi"
+    local arrayname=${_la:-sd_noarray}
+    local indexname=${_li:-sd_noindex}
+    local -n _sd_la=$arrayname
+    local -n _sd_li=$indexname
+    local maxindex=${#_sd_la[@]}
+    local height=${_lh:-1}
+    local multi=${_lm:-no}
+    local ilight ifirst _ilight_var _ifirst_var
+
+    _ilight_var="sd_${name}_ilight"
+    _ifirst_var="sd_${name}_ifirst"
+    ilight="${!_ilight_var:-0}"
+    ifirst="${!_ifirst_var:-0}"
+
+    local exilight=-1 c='' retval='' i='' text=''
+
+    while true; do
+        if (( ilight != exilight )); then
+            exilight=$ilight
+            _sd_listbox_draw "$name"
+        fi
+
+        printf '%s' "${_SD_CAPS[cnorm]}"
+        read -r -s -n1 c
+        printf '%s' "${_SD_CAPS[civis]}"
+        c="$(_sd_escape_parse "$c")"
+
+        case "$c" in
+            $'\e')      retval=27;  break ;;
+            $'\ekcuf1') retval=255; break ;;
+            $'\ekcub1') retval=254; break ;;
+            $'\eht')    retval=255; break ;;
+            $'\ekcbt')  retval=254; break ;;
+            $'\ekcuu1') (( ilight-- )) ;;
+            $'\ekcud1') (( ilight++ )) ;;
+            $'\ekpp')
+                (( ilight == ifirst )) && ilight=$(( ilight - height )) || ilight=$ifirst
+                ;;
+            $'\eknp')
+                (( ilight == ifirst + height - 1 )) && ilight=$(( ilight + height )) || ilight=$(( ifirst + height - 1 ))
+                ;;
+            $'\ekhome') ilight=0 ;;
+            $'\ekend')  ilight=$(( maxindex - 1 )) ;;
+            '')
+                if [[ $multi == no ]]; then
+                    for (( i = 0; i < maxindex; i++ )); do
+                        unset "_sd_li[$i]"
+                    done
+                    _sd_li[ilight]="${_sd_la[ilight]}"
+                    exilight=-1
+                fi
+                retval=255; break ;;
+            ' ')
+                if [[ $multi == no ]]; then
+                    for (( i = 0; i < maxindex; i++ )); do
+                        unset "_sd_li[$i]"
+                    done
+                    _sd_li[ilight]="${_sd_la[ilight]}"
+                else
+                    if [[ -v _sd_li[ilight] ]]; then
+                        unset "_sd_li[ilight]"
+                    else
+                        _sd_li[ilight]="${_sd_la[ilight]}"
+                    fi
+                fi
+                exilight=-1
+                ;;
+            *)
+                shopt -s nocasematch
+                i=$(( ilight + 1 ))
+                while (( i != ilight )); do
+                    [[ ${_sd_la[$i]:0:1} == "$c" ]] && break
+                    (( i++ ))
+                    (( i >= maxindex )) && i=0
+                done
+                ilight=$i
+                shopt -u nocasematch
+                ;;
+        esac
+
+        (( ilight < 0 )) && ilight=0
+        (( ilight >= maxindex )) && ilight=$(( maxindex - 1 ))
+        (( ilight < ifirst )) && ifirst=$ilight
+        (( ilight >= ifirst + height )) && ifirst=$(( ilight - height + 1 ))
+
+        declare -g "sd_${name}_ilight=$ilight"
+        declare -g "sd_${name}_ifirst=$ifirst"
+    done
+    return "$retval"
+}
+
+_sd_listbox_draw() {
+    local name=$1
+    local -n _lx="sd_${name}_x" _ly="sd_${name}_y"
+    local -n _lw="sd_${name}_width" _lh2="sd_${name}_height"
+    local -n _lmk="sd_${name}_mark"
+    local -n _la2="sd_${name}_arrayname" _li2="sd_${name}_indexname"
+    local x=${_lx:-0} y=${_ly:-0}
+    local width=${_lw:-4} height=${_lh2:-1}
+    local mark=${_lmk:-no}
+    local arrayname=${_la2:-sd_noarray}
+    local indexname=${_li2:-sd_noindex}
+    local -n _sd_la2=$arrayname
+    local -n _sd_li2=$indexname
+    local _ilight_var="sd_${name}_ilight"
+    local _ifirst_var="sd_${name}_ifirst"
+    local ilight="${!_ilight_var:-0}"
+    local ifirst="${!_ifirst_var:-0}"
+    local maxindex=${#_sd_la2[@]}
+
+    local sgr0=${_SD_CAPS[sgr0]} bold=${_SD_CAPS[bold]}
+    local cn cf ck scn sck scb
+    cn="$sgr0$(_sd_fg "$_SD_LIST_FG")$bold$(_sd_bg "$_SD_LIST_BG")"
+    cf="$sgr0$(_sd_fg "$_SD_LIST_KEY")$(_sd_bg "$_SD_LIST_BG")"
+    ck="$sgr0$(_sd_fg "$_SD_LIST_BG")$(_sd_bg "$_SD_LIST_BG")"
+    scn="$sgr0$(_sd_fg "$_SD_LIST_SEL_FG")$bold$(_sd_bg "$_SD_LIST_SEL_BG")"
+    sck="$sgr0$(_sd_fg "$_SD_LIST_KEY")$bold$(_sd_bg "$_SD_LIST_SEL_BG")"
+    scb="$sgr0$(_sd_fg 7)$bold$(_sd_bg "$_SD_LIST_SEL_BG")"
+
+    if [[ $mark != no ]]; then
+        if (( width < _SD_MARK_WIDTH )); then width=0; else (( width -= _SD_MARK_WIDTH )); fi
+    fi
+
+    local y2 taby2 text xrest
+    for (( y2 = 0, taby2 = ifirst; y2 < height && taby2 < maxindex; y2++, taby2++ )); do
+        _sd_pos "$(( y + y2 ))" "$x"
+
+        if [[ $mark != no ]]; then
+            printf '%s' "$cn"
+            if [[ $mark == radio ]]; then
+                [[ -v _sd_li2[$taby2] ]] && printf '%s' "$_SD_RADIO_ON" || printf '%s' "$_SD_RADIO_OFF"
+            else
+                [[ -v _sd_li2[$taby2] ]] && printf '%s' "$_SD_CHECK_ON" || printf '%s' "$_SD_CHECK_OFF"
+            fi
+            printf '%s' "$cn "
+        fi
+
+        text="${_sd_la2[$taby2]}"
+        text="${text::$width}"
+        xrest=$(( width - ${#text} ))
+        (( ilight == taby2 )) && printf '%s' "$sck" || printf '%s' "$cf"
+        printf '%s' "${text:0:1}"
+        (( ilight == taby2 )) && printf '%s' "$scn" || printf '%s' "$cn"
+        printf '%s' "${text:1}"
+        printf '%s' "$cn"
+        printf '%-'"$xrest"'s' ''
+    done
+
+    [[ $mark == no ]] || (( x += _SD_MARK_WIDTH ))
+    (( ilight - ifirst < height )) && _sd_pos "$(( y + ilight - ifirst ))" "$x"
+
+    local scroll_color="$sgr0$(_sd_fg "$_SD_LIST_FG")$(_sd_bg "$_SD_LIST_BG")"
+    if (( ifirst > 0 )); then
+        _sd_pos "$y" "$(( x + width - 1 ))"
+        printf '%s' "${scroll_color}$_SD_SCROLL_UP"
+    fi
+    if (( ifirst + height < maxindex )); then
+        _sd_pos "$(( y + height - 1 ))" "$(( x + width - 1 ))"
+        printf '%s' "${scroll_color}$_SD_SCROLL_DOWN"
+    fi
+}

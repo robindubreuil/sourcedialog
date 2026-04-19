@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+source "$(dirname "$0")/../sourcedialog"
+
+sd_load_canvas     name=mycanvas  x=20 y=5  width=40 height=10 caption="EXAMPLE 1"
+sd_load_frame      name=myframe   x=23 y=7  width=34 height=5
+sd_load_textbox    name=mytext    x=25 y=8  width=30 height=3 text="Once a man has tasted freedom he will never be content to be a slave."
+sd_load_pushbutton name=mybutton1 x=30 y=13 caption="  OK  "
+sd_load_pushbutton name=mybutton2 x=42 y=13 caption="Cancel"
+
+sd_mybutton1_push () { return 0; }
+sd_mybutton2_push () { return 1; }
+
+sd_start; retval=$?
+
+clear
+case $retval in
+  27) echo "Esc pressed." ;;
+  0)  echo "OK pressed." ;;
+  1)  echo "Cancel pressed." ;;
+esac
