@@ -4,7 +4,7 @@ SourceDialog is a pure Bash TUI dialog library you can source from your own
 scripts to create interactive terminal forms — no external dependencies
 (dialog, whiptail, ncurses, etc.).
 
-![example of dialog](https://repository-images.githubusercontent.com/966361037/940581b7-edfc-48ca-a55a-5dc95aa3de30 "Source Dialog")
+![sourcedialog screenshot](screenshot.png)
 
 ## Features
 
