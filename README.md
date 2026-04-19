@@ -121,7 +121,7 @@ bash examples/example3    # account creation
 
 ## License
 
-Copyright (c) 2025 Robin Dubreuil <63008968+robindubreuil@users.noreply.github.com>
+Copyright (c) 2025 Robin Dubreuil <robindubreuil@users.noreply.github.com>
 Licensed under the GNU General Public License v3. See [LICENSE](LICENSE).
 
 ## Credits
